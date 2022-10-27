@@ -79,6 +79,8 @@ def get_args_parser():
                         help="Relative classification weight of the no-object class")
 
     # dataset parameters
+    parser.add_argument('--num_classes', default=None, type=int,
+                        help='#classes in your dataset, which can override the value hard-coded in file models/detr.py')
     parser.add_argument('--dataset_file', default='coco')
     parser.add_argument('--coco_path', type=str)
     parser.add_argument('--coco_panoptic_path', type=str)
@@ -93,7 +95,7 @@ def get_args_parser():
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
     parser.add_argument('--eval', action='store_true')
-    parser.add_argument('--num_workers', default=2, type=int)
+    parser.add_argument('--num_workers', default=1, type=int)
 
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
@@ -103,6 +105,7 @@ def get_args_parser():
 
 
 def main(args):
+    
     utils.init_distributed_mode(args)
     print("git:\n  {}\n".format(utils.get_sha()))
 
@@ -137,7 +140,7 @@ def main(args):
     ]
     optimizer = torch.optim.AdamW(param_dicts, lr=args.lr,
                                   weight_decay=args.weight_decay)
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop)
+    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer, args.lr_drop, gamma=0.1, verbose=True)
 
     dataset_train = build_dataset(image_set='train', args=args)
     dataset_val = build_dataset(image_set='val', args=args)
@@ -153,10 +156,12 @@ def main(args):
         sampler_train, args.batch_size, drop_last=True)
 
     data_loader_train = DataLoader(dataset_train, batch_sampler=batch_sampler_train,
-                                   collate_fn=utils.collate_fn, num_workers=args.num_workers)
+                                   collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                  persistent_workers=True)
     data_loader_val = DataLoader(dataset_val, args.batch_size, sampler=sampler_val,
-                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers)
-
+                                 drop_last=False, collate_fn=utils.collate_fn, num_workers=args.num_workers,
+                                persistent_workers=True)
+    
     if args.dataset_file == "coco_panoptic":
         # We also evaluate AP during panoptic training, on original coco DS
         coco_val = datasets.coco.build("val", args)
@@ -175,7 +180,7 @@ def main(args):
                 args.resume, map_location='cpu', check_hash=True)
         else:
             checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
+        model_without_ddp.load_state_dict(checkpoint['model'], strict=False)
         if not args.eval and 'optimizer' in checkpoint and 'lr_scheduler' in checkpoint and 'epoch' in checkpoint:
             optimizer.load_state_dict(checkpoint['optimizer'])
             lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
@@ -190,18 +195,32 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
+    
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             sampler_train.set_epoch(epoch)
+            
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer, device, epoch,
             args.clip_max_norm)
+        
+        print(f'***Epoch {epoch} train stats:')
+        num_batches = len(data_loader_train)//args.batch_size
+        for k, v in train_stats.items():
+            ## might need a better way to do str(v)
+            if type(v) in [float, np.float64, int, np.int32]:
+                print(f'{k}: avg:{v:.4f}, cum:{round(v*num_batches)}')
+            else:
+                print(f'{k}: \n{v}')
+        
         lr_scheduler.step()
+        
         if args.output_dir:
             checkpoint_paths = [output_dir / 'checkpoint.pth']
-            # extra checkpoint before LR drop and every 100 epochs
+            # extra checkpoint before LR drop and every 100 epoch
             if (epoch + 1) % args.lr_drop == 0 or (epoch + 1) % 100 == 0:
                 checkpoint_paths.append(output_dir / f'checkpoint{epoch:04}.pth')
+                
             for checkpoint_path in checkpoint_paths:
                 utils.save_on_master({
                     'model': model_without_ddp.state_dict(),
@@ -214,9 +233,23 @@ def main(args):
         test_stats, coco_evaluator = evaluate(
             model, criterion, postprocessors, data_loader_val, base_ds, device, args.output_dir
         )
-
-        log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                     **{f'test_{k}': v for k, v in test_stats.items()},
+        print(f'***Epoch {epoch} test stats:')
+        num_batches = len(data_loader_val)//args.batch_size
+        for k, v in test_stats.items():
+            if type(v) in [float, np.float64, int, np.int32]:
+                print(f'{k}: avg:{v:.4f}, cum:{round(v*num_batches)}')
+            else:
+                if k.startswith('cm'):
+                    ## this is a confusion matrix, compute f1
+                    print(f'{k}: \n{v}')
+                    TP = np.diag(v)
+                    FP = np.sum(v, axis=0) - TP
+                    FN = np.sum(v, axis=1) - TP
+                    f1 = (TP + 1)/(TP + (FP+FN)/2 + 1)
+                    print(f'f1 scores are : {f1}')
+        
+        log_stats = {**{f'train_{k}': v for k, v in train_stats.items() if not k.startswith('cm')},
+                     **{f'test_{k}': v for k, v in test_stats.items() if not k.startswith('cm')},
                      'epoch': epoch,
                      'n_parameters': n_parameters}
 

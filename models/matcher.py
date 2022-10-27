@@ -60,7 +60,9 @@ class HungarianMatcher(nn.Module):
 
         # Also concat the target labels and boxes
         tgt_ids = torch.cat([v["labels"] for v in targets])
+#         print(f'Hungarian_Fwd: target ids are {tgt_ids}. image_id is {targets[0]["image_id"]}')
         tgt_bbox = torch.cat([v["boxes"] for v in targets])
+#         print(f'Hungarian_Fwd: target boxes are {tgt_bbox}')
 
         # Compute the classification cost. Contrary to the loss, we don't use the NLL,
         # but approximate it in 1 - proba[target class].

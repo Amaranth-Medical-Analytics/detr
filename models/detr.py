@@ -17,6 +17,14 @@ from .segmentation import (DETRsegm, PostProcessPanoptic, PostProcessSegm,
                            dice_loss, sigmoid_focal_loss)
 from .transformer import build_transformer
 
+##Darshat
+import traceback
+from sklearn.metrics import confusion_matrix, ConfusionMatrixDisplay
+from matplotlib import pyplot as plt
+
+##Lavanya
+import numpy as np
+
 
 class DETR(nn.Module):
     """ This is the DETR module that performs object detection """
@@ -104,26 +112,115 @@ class SetCriterion(nn.Module):
         empty_weight = torch.ones(self.num_classes + 1)
         empty_weight[-1] = self.eos_coef
         self.register_buffer('empty_weight', empty_weight)
+        
+        
+    def do_interesting_misses(self, b_p, b_y, b_image_ids, labels):
+        for n in range(len(b_image_ids)):
+            image_id = b_image_ids[n]
+            p = b_p[n]
+            y = b_y[n]
+            cm = confusion_matrix(y, p, labels=labels)
+            ## if cm has interesting misses, print image id 
+            
+    def get_confusion_matrix(self, p, y, threshold):
+        ## p=predictions, y=gt
+        
+        ## consider rows where atleast one prediction exceeds threshold
+        p_softmax = p.clone().detach().softmax(-1)
+        keep = p_softmax.max(-1).values > threshold
+        ## for remaining cases, assign to no class
+        ## e.g. if threshold is 0.75 then [0, 0.1, 0.7, 0.1, 0.1(no class)]  -> [0, 0.1, 0.7, 0.1, 1(no class)]
+        no_class_candidates = p_softmax[~keep]
+        no_class_candidates[:,-1] = 1
+        p_softmax[~keep] = no_class_candidates
+        p_softmax_np = p_softmax.argmax(-1).cpu().numpy().flatten()
+        
+        y_np = y.clone().detach().cpu().numpy().flatten()
+        ## labels are [NA, actual labels, NoClass]. For CM, skip NA
+        labels = [i for i in range(1, self.num_classes+1)]
+        cm = confusion_matrix(y_np, p_softmax_np, labels=labels)
+        return cm
 
     def loss_labels(self, outputs, targets, indices, num_boxes, log=True):
         """Classification loss (NLL)
         targets dicts must contain the key "labels" containing a tensor of dim [nb_target_boxes]
         """
         assert 'pred_logits' in outputs
+        
+        # outputs is a dictionary, targets is a list
+        # dict_keys(['pred_logits', 'pred_boxes', 'aux_outputs']), each key has 2 (batch size # of 
+        #objs), len of targets 2 (batch size)
+        # target[0].keys() 
+        # dict_keys(['boxes', 'labels', 'image_id', 'area', 'iscrowd', 'orig_size', 'size'])
+        
         src_logits = outputs['pred_logits']
 
         idx = self._get_src_permutation_idx(indices)
+        
         target_classes_o = torch.cat([t["labels"][J] for t, (_, J) in zip(targets, indices)])
+        
         target_classes = torch.full(src_logits.shape[:2], self.num_classes,
                                     dtype=torch.int64, device=src_logits.device)
+        
         target_classes[idx] = target_classes_o
-
-        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)
+        
+        # loss_ce is scalar
+        loss_ce = F.cross_entropy(src_logits.transpose(1, 2), target_classes, self.empty_weight)        
         losses = {'loss_ce': loss_ce}
 
+        # loss per class index torch.Size([2, 100]) 
+        loss_ce_class = F.cross_entropy(src_logits.transpose(1, 2), target_classes, \
+                                  self.empty_weight, reduction='none')
+        
+       
+        target_class_np = np.array(target_classes.clone().detach().cpu().numpy().flatten()) # ground truth
+        
+        for threshold in np.arange(0.1,0.9,0.1):
+            cm = self.get_confusion_matrix(src_logits, target_classes, threshold)
+            tstr = str(int(threshold*100))
+            losses[f'cm_{tstr}'] = cm
+#             if threshold==0.5:
+#                 print(f'cm at threshold {threshold:.1f} is {cm}')
+            for label_ in range(self.num_classes):
+                other_rows = [i for i in range(self.num_classes) if i != label_]
+                other_cols = [i for i in range(self.num_classes) if i != label_]
+#                 if threshold==0.5:
+#                     print(f'for label {label_} other rows are {other_rows}')
+#                     print(f'for label {label_} other cols are {other_cols}')
+
+                tp = int(cm[label_][label_])
+                fp = int(np.sum(cm[other_rows, label_]))
+                fn = int(np.sum(cm[label_, other_cols]))
+#                 if threshold==0.5:
+#                     print(f'tp,fp,fn={tp,fp,fn}')
+                tn = int(np.sum(cm[other_rows, other_cols]))
+                f1 = (tp + 1)/(tp + (fp+fn)/2 + 1)
+                losses[f'f1_{label_}_{tstr}'] = f1
+            
+        
+        ## determine interesting misses per image. Do not flatten the batch.
+#         self.do_interesting_misses(src_logits_softmax.argmax(-1).detach().cpu().numpy(),
+#                                   target_classes.cpu().detach().numpy(),
+#                                   [t['image_id'] for t in targets],
+#                                   labels
+#                                  )
+            
+        loss_ce_class_np = np.array(loss_ce_class.cpu().detach().numpy().flatten()) # errors
+        for i in range(self.num_classes+1):
+            idx_class_wise = np.where(target_class_np == i)[0]
+            key = 'class_wise_error_'+str(i)
+            
+            if len(idx_class_wise) != 0:
+                value = np.mean(loss_ce_class_np[idx_class_wise])
+                losses[key] = value
+            else:
+                value = 0
+                losses[key] = value
+                 
         if log:
             # TODO this should probably be a separate loss, not hacked in this one here
             losses['class_error'] = 100 - accuracy(src_logits[idx], target_classes_o)[0]
+            
         return losses
 
     @torch.no_grad()
@@ -154,7 +251,8 @@ class SetCriterion(nn.Module):
 
         losses = {}
         losses['loss_bbox'] = loss_bbox.sum() / num_boxes
-
+        
+#         print(f'Detr_loss_boxes: target boxes are {target_boxes}')
         loss_giou = 1 - torch.diag(box_ops.generalized_box_iou(
             box_ops.box_cxcywh_to_xyxy(src_boxes),
             box_ops.box_cxcywh_to_xyxy(target_boxes)))
@@ -221,11 +319,15 @@ class SetCriterion(nn.Module):
         """
         outputs_without_aux = {k: v for k, v in outputs.items() if k != 'aux_outputs'}
 
+#         print(f'SetCriterion_Fwd: printing stack')
+#         traceback.print_stack()
         # Retrieve the matching between the outputs of the last layer and the targets
+#         print(f'SetCriterion_Fwd: targets imageid is {targets["image_id"]}, labels {targets["labels"]}, boxes {targets["boxes"]}')
         indices = self.matcher(outputs_without_aux, targets)
 
         # Compute the average number of target boxes accross all nodes, for normalization purposes
         num_boxes = sum(len(t["labels"]) for t in targets)
+#         print(f'SetCriterion_Fwd: numboxs in target is {num_boxes}')
         num_boxes = torch.as_tensor([num_boxes], dtype=torch.float, device=next(iter(outputs.values())).device)
         if is_dist_avail_and_initialized():
             torch.distributed.all_reduce(num_boxes)
@@ -236,7 +338,8 @@ class SetCriterion(nn.Module):
         for loss in self.losses:
             losses.update(self.get_loss(loss, outputs, targets, indices, num_boxes))
 
-        # In case of auxiliary losses, we repeat this process with the output of each intermediate layer.
+        # In case of auxiliary losses 
+        # we repeat this process with the output of each intermediate layer.
         if 'aux_outputs' in outputs:
             for i, aux_outputs in enumerate(outputs['aux_outputs']):
                 indices = self.matcher(aux_outputs, targets)
@@ -251,7 +354,7 @@ class SetCriterion(nn.Module):
                     l_dict = self.get_loss(loss, aux_outputs, targets, indices, num_boxes, **kwargs)
                     l_dict = {k + f'_{i}': v for k, v in l_dict.items()}
                     losses.update(l_dict)
-
+                    
         return losses
 
 
@@ -315,6 +418,16 @@ def build(args):
         # for panoptic, we just add a num_classes that is large enough to hold
         # max_obj_id + 1, but the exact value doesn't really matter
         num_classes = 250
+    if args.dataset_file == 'custom':
+        # "You should always use num_classes = max_id + 1 where max_id is the highest class ID that you have in your dataset."
+        # Reference: https://github.com/facebookresearch/detr/issues/108#issuecomment-650269223
+        num_classes = 2
+        
+    num_classes_specified_at_run_time = args.num_classes
+    
+    if num_classes_specified_at_run_time is not None:
+        # Override the value hard-coded in this file with the value specified at run-time
+        num_classes = num_classes_specified_at_run_time
     device = torch.device(args.device)
 
     backbone = build_backbone(args)
@@ -331,11 +444,16 @@ def build(args):
     if args.masks:
         model = DETRsegm(model, freeze_detr=(args.frozen_weights is not None))
     matcher = build_matcher(args)
-    weight_dict = {'loss_ce': 1, 'loss_bbox': args.bbox_loss_coef}
+    
+    ##!! Darshat, celoss changed to 5
+#     weight_dict = {'loss_ce': 1, 'loss_bbox': args.bbox_loss_coef}
+    weight_dict = {'loss_ce': 5, 'loss_bbox': args.bbox_loss_coef}
     weight_dict['loss_giou'] = args.giou_loss_coef
+    
     if args.masks:
         weight_dict["loss_mask"] = args.mask_loss_coef
         weight_dict["loss_dice"] = args.dice_loss_coef
+        
     # TODO this is a hack
     if args.aux_loss:
         aux_weight_dict = {}

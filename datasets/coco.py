@@ -13,6 +13,11 @@ from pycocotools import mask as coco_mask
 
 import datasets.transforms as T
 
+## Darshat: added HE_Transform 
+import sys
+from Fast_WSI_Color_Norm.he_transform import HE_Transform
+from Fast_WSI_Color_Norm.he_perturb_transform import HE_Perturb_Transform
+
 
 class CocoDetection(torchvision.datasets.CocoDetection):
     def __init__(self, img_folder, ann_file, transforms, return_masks):
@@ -21,6 +26,7 @@ class CocoDetection(torchvision.datasets.CocoDetection):
         self.prepare = ConvertCocoPolysToMask(return_masks)
 
     def __getitem__(self, idx):
+#         print(f'Getting data for train file at idx {idx}, path is {self.coco.loadImgs(idx)[0]["file_name"]}')
         img, target = super(CocoDetection, self).__getitem__(idx)
         image_id = self.ids[idx]
         target = {'image_id': image_id, 'annotations': target}
@@ -111,7 +117,7 @@ class ConvertCocoPolysToMask(object):
 
         return image, target
 
-
+### ORIGINAL DETR 
 def make_coco_transforms(image_set):
 
     normalize = T.Compose([
@@ -120,10 +126,12 @@ def make_coco_transforms(image_set):
     ])
 
     scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
-
+    ##!!TODO grab cache path from cmdline
     if image_set == 'train':
         return T.Compose([
+            T.RandomSelect(HE_Transform(cache_path='/media/App/amaranth/projects/monusac/cache/'), HE_Perturb_Transform(cache_path='/media/App/amaranth/projects/monusac/cache/')),
             T.RandomHorizontalFlip(),
+            T.RandomVerticalFlip(),
             T.RandomSelect(
                 T.RandomResize(scales, max_size=1333),
                 T.Compose([
@@ -142,6 +150,54 @@ def make_coco_transforms(image_set):
         ])
 
     raise ValueError(f'unknown {image_set}')
+
+
+
+# def make_coco_transforms(image_set):
+    
+#     # keeping the standard values of mean and std
+#     normalize = T.Compose([
+#         T.ToTensor(),
+#         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+#     ])
+
+#     if image_set == 'train':
+#         return T.Compose([
+#             T.RandomHorizontalFlip(),
+#             T.RandomVerticalFlip(),
+#             normalize,
+#         ])
+
+#     if image_set == 'val':
+#         return T.Compose([
+#             normalize,
+#         ])
+    
+#     scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+#     if image_set == 'train':
+#         return T.Compose([
+#             ## Darshat: first step use original or HE normalized image
+# #             HE_Transform(),
+#             T.RandomHorizontalFlip(),
+#             T.RandomVerticalFlip(),
+#             T.RandomSelect(
+#                 T.RandomResize(scales, max_size=1333),
+#                 T.Compose([
+#                     T.RandomResize([400, 500, 600]),
+#                     T.RandomSizeCrop(384, 600),
+#                     T.RandomResize(scales, max_size=1333),
+#                 ])
+#             ),
+#             normalize,
+#         ])
+
+#     if image_set == 'val':
+#         return T.Compose([
+# #             T.RandomResize([800], max_size=1333),
+#             normalize,
+#         ])
+
+#     raise ValueError(f'unknown {image_set}')
 
 
 def build(image_set, args):

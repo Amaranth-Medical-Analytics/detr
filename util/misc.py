@@ -18,10 +18,13 @@ from torch import Tensor
 
 # needed due to empty tensor bug in pytorch and torchvision 0.5
 import torchvision
-if float(torchvision.__version__.split(".")[1]) < 7.0:
+if float(torchvision.__version__[:3]) < 0.7:
     from torchvision.ops import _new_empty_tensor
     from torchvision.ops.misc import _output_size
 
+
+## Lavanya 
+import numpy as np
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a
@@ -29,22 +32,33 @@ class SmoothedValue(object):
     """
 
     def __init__(self, window_size=20, fmt=None):
-        if fmt is None:
-            fmt = "{median:.4f} ({global_avg:.4f})"
+        self.fmt = None
+            
         self.deque = deque(maxlen=window_size)
-        self.total = 0.0
+        ## Darshat - allow ndarray representing sequence of values to also be aggregated
+        ## for confusion matrix
+#         self.total = 0.0
+        self.total = None
         self.count = 0
         self.fmt = fmt
 
     def update(self, value, n=1):
         self.deque.append(value)
         self.count += n
-        self.total += value * n
+        if self.total is None:
+            self.total = value * n
+        else:
+            self.total += value * n
 
     def synchronize_between_processes(self):
         """
         Warning: does not synchronize the deque!
         """
+        ## not yet implemented e.g. for confusion matrix
+        if type(self.total) == np.ndarray:
+            return
+        
+        
         if not is_dist_avail_and_initialized():
             return
         t = torch.tensor([self.count, self.total], dtype=torch.float64, device='cuda')
@@ -56,33 +70,61 @@ class SmoothedValue(object):
 
     @property
     def median(self):
+        if type(self.total) == np.ndarray:
+#             print(f'no median for confusion matrix!')
+            return 0
         d = torch.tensor(list(self.deque))
         return d.median().item()
 
     @property
     def avg(self):
+        if type(self.total) == np.ndarray:
+#             print(f'no avg for confusion matrix!')
+            return 0
+        
+        if len(list(self.deque)) == 0:
+            print(f'SmoothedValue: trying to get average of 0 sized list, returning 0')
+            return 0
         d = torch.tensor(list(self.deque), dtype=torch.float32)
         return d.mean().item()
 
     @property
     def global_avg(self):
+        if self.count == 0: 
+            return 0
         return self.total / self.count
 
     @property
     def max(self):
+        if type(self.total) == np.ndarray:
+#             print(f'no max for confusion matrix!')
+            return 0
         return max(self.deque)
 
     @property
     def value(self):
+        if type(self.total) == np.ndarray:
+#             print(f'no value for confusion matrix!')
+            return 0
         return self.deque[-1]
+    
+    @property
+    def cum_value(self):
+        return self.total
 
     def __str__(self):
+        if self.fmt is None:
+            if type(self.total) != np.ndarray:
+                self.fmt = "total={cum_value:.4f}, median={median:.4f}, avg=({global_avg:.4f})"
+            else:
+                self.fmt = "Cumulative value=\n{cum_value}"
         return self.fmt.format(
             median=self.median,
             avg=self.avg,
             global_avg=self.global_avg,
             max=self.max,
-            value=self.value)
+            value=self.value,
+            cum_value=self.cum_value)
 
 
 def all_gather(data):
@@ -152,19 +194,22 @@ def reduce_dict(input_dict, average=True):
         if average:
             values /= world_size
         reduced_dict = {k: v for k, v in zip(names, values)}
+    
+    # print(f'reduce_dict: returning reduced_dict {reduced_dict}')    
     return reduced_dict
 
 
 class MetricLogger(object):
-    def __init__(self, delimiter="\t"):
+    def __init__(self, delimiter="\n"):
         self.meters = defaultdict(SmoothedValue)
         self.delimiter = delimiter
 
     def update(self, **kwargs):
         for k, v in kwargs.items():
+#             print(f'MetricLogger update: v {v}, v type {type(v)}, k {k}')
             if isinstance(v, torch.Tensor):
                 v = v.item()
-            assert isinstance(v, (float, int))
+            assert isinstance(v, (float, int, np.float32, np.ndarray))
             self.meters[k].update(v)
 
     def __getattr__(self, attr):
@@ -178,9 +223,10 @@ class MetricLogger(object):
     def __str__(self):
         loss_str = []
         for name, meter in self.meters.items():
-            loss_str.append(
-                "{}: {}".format(name, str(meter))
-            )
+            ## skip printing confusion matrices
+            if type(meter.cum_value) == np.ndarray:
+                continue
+            loss_str.append(f'{name}: {str(meter)}\n')
         return self.delimiter.join(loss_str)
 
     def synchronize_between_processes(self):
@@ -454,7 +500,7 @@ def interpolate(input, size=None, scale_factor=None, mode="nearest", align_corne
     This will eventually be supported natively by PyTorch, and this
     class can go away.
     """
-    if float(torchvision.__version__.split(".")[1]) < 7.0:
+    if float(torchvision.__version__[:3]) < 0.7:
         if input.numel() > 0:
             return torch.nn.functional.interpolate(
                 input, size, scale_factor, mode, align_corners
