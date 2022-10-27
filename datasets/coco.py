@@ -118,7 +118,7 @@ class ConvertCocoPolysToMask(object):
         return image, target
 
 ### ORIGINAL DETR 
-def make_coco_transforms(image_set):
+def make_coco_transforms(image_set, use_HE_transforms=None):
 
     normalize = T.Compose([
         T.ToTensor(),
@@ -127,21 +127,37 @@ def make_coco_transforms(image_set):
 
     scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
     ##!!TODO grab cache path from cmdline
+    ##!!TODO grab resize param from cmdline
     if image_set == 'train':
-        return T.Compose([
-            T.RandomSelect(HE_Transform(cache_path='/media/App/amaranth/projects/monusac/cache/'), HE_Perturb_Transform(cache_path='/media/App/amaranth/projects/monusac/cache/')),
-            T.RandomHorizontalFlip(),
-            T.RandomVerticalFlip(),
-            T.RandomSelect(
-                T.RandomResize(scales, max_size=1333),
-                T.Compose([
-                    T.RandomResize([400, 500, 600]),
-                    T.RandomSizeCrop(384, 600),
+        if (use_HE_transforms is not None) and (use_HE_transforms == True):
+            return T.Compose([
+                T.RandomSelect(HE_Transform(cache_path='/media/App/amaranth/projects/monusac/cache/'), HE_Perturb_Transform(cache_path='/media/App/amaranth/projects/monusac/cache/')),
+                T.RandomHorizontalFlip(),
+                T.RandomVerticalFlip(),
+                T.RandomSelect(
                     T.RandomResize(scales, max_size=1333),
-                ])
-            ),
-            normalize,
-        ])
+                    T.Compose([
+                        T.RandomResize([400, 500, 600]),
+                        T.RandomSizeCrop(384, 600),
+                        T.RandomResize(scales, max_size=1333),
+                    ])
+                ),
+                normalize,
+            ])
+        else:
+            return T.Compose([
+                T.RandomHorizontalFlip(),
+                T.RandomVerticalFlip(),
+                T.RandomSelect(
+                    T.RandomResize(scales, max_size=1333),
+                    T.Compose([
+                        T.RandomResize([400, 500, 600]),
+                        T.RandomSizeCrop(384, 600),
+                        T.RandomResize(scales, max_size=1333),
+                    ])
+                ),
+                normalize,
+            ])
 
     if image_set == 'val':
         return T.Compose([
@@ -150,54 +166,6 @@ def make_coco_transforms(image_set):
         ])
 
     raise ValueError(f'unknown {image_set}')
-
-
-
-# def make_coco_transforms(image_set):
-    
-#     # keeping the standard values of mean and std
-#     normalize = T.Compose([
-#         T.ToTensor(),
-#         T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-#     ])
-
-#     if image_set == 'train':
-#         return T.Compose([
-#             T.RandomHorizontalFlip(),
-#             T.RandomVerticalFlip(),
-#             normalize,
-#         ])
-
-#     if image_set == 'val':
-#         return T.Compose([
-#             normalize,
-#         ])
-    
-#     scales = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
-#     if image_set == 'train':
-#         return T.Compose([
-#             ## Darshat: first step use original or HE normalized image
-# #             HE_Transform(),
-#             T.RandomHorizontalFlip(),
-#             T.RandomVerticalFlip(),
-#             T.RandomSelect(
-#                 T.RandomResize(scales, max_size=1333),
-#                 T.Compose([
-#                     T.RandomResize([400, 500, 600]),
-#                     T.RandomSizeCrop(384, 600),
-#                     T.RandomResize(scales, max_size=1333),
-#                 ])
-#             ),
-#             normalize,
-#         ])
-
-#     if image_set == 'val':
-#         return T.Compose([
-# #             T.RandomResize([800], max_size=1333),
-#             normalize,
-#         ])
-
-#     raise ValueError(f'unknown {image_set}')
 
 
 def build(image_set, args):
@@ -210,5 +178,7 @@ def build(image_set, args):
     }
 
     img_folder, ann_file = PATHS[image_set]
-    dataset = CocoDetection(img_folder, ann_file, transforms=make_coco_transforms(image_set), return_masks=args.masks)
+    dataset = CocoDetection(img_folder, ann_file, 
+                            transforms=make_coco_transforms(image_set, args.use_HE_transforms), 
+                            return_masks=args.masks)
     return dataset

@@ -97,6 +97,9 @@ def get_args_parser():
     parser.add_argument('--eval', action='store_true')
     parser.add_argument('--num_workers', default=1, type=int)
 
+    # Transform types
+    parser.add_argument('--use_HE_transforms', action='store_true')
+
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
